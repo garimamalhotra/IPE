@@ -36,6 +36,13 @@ The script configures with coupling disabled and adds the netCDF-Fortran link
 flags from `nf-config` (the reader calls the `nf90_*` API, which the base build
 does not link). The executable is installed to `install/bin/ipe.x`.
 
+## Examples
+
+`examples/` contains:
+- `IPE.inp.example` — annotated namelist showing the MSIS-HWM and file-reader options
+- `run_ipe.sh` — minimal, machine-agnostic run wrapper
+- `run_ipe_derecho.sh` — full PBS run script for Derecho (spack-stack)
+
 ## Selecting the neutral source
 
 The neutral source is chosen in the `IPE.inp` namelist:
