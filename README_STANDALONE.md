@@ -67,6 +67,19 @@ the reader detects which path to use from the file's `nlon`/`nlat`. The optional
 `NEUTRAL_*_SCALE` factors multiply the corresponding neutral field (default 1.0).
 `VERBOSE_DIAG_LOCAL = T` enables the diagnostic output.
 
+## Preparing FV3WAM files
+
+FV3WAM history files (`atmf*.nc`) are converted to the `gsm.*.nc` format with
+`scripts/fv3wam_to_gsm.py`:
+
+```bash
+python scripts/fv3wam_to_gsm.py -i <atmf_dir> -o <gsm_dir> --nproc 8
+```
+
+Point `GSM_NEUTRALS_DIR` at `<gsm_dir>`. The vertical levels are fixed from the
+first file (or `--ref`) so every output has the same number of levels, which the
+reader requires. Needs `h5py`, `hdf5plugin`, `netCDF4`, `numpy`.
+
 ## Input file format
 
 Each hourly `gsm.YYYYMMDD_HHMMSS.nc` file holds, on a `(lon, lat, level)` grid:
