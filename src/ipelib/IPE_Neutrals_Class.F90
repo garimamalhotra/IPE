@@ -5,6 +5,9 @@ MODULE IPE_Neutrals_Class
   USE IPE_Grid_Class
   USE IPE_Time_Class
   USE IPE_Forcing_Class
+  USE IPE_MPI_Layer_Class
+  USE IPE_Model_Parameters_Class
+  USE IPE_Neutrals_FileReader
   USE ipe_error_module
 
   ! MSIS
@@ -29,6 +32,9 @@ MODULE IPE_Neutrals_Class
     REAL(prec), POINTER :: velocity_geographic(:,:,:,:)
     REAL(prec), POINTER :: velocity_apex(:,:,:,:)
 
+    ! GSM/NetCDF file reader for direct neutral input
+    TYPE(IPE_FileReader) :: file_reader
+
     ! Interpolated fields
     REAL(prec), ALLOCATABLE :: geo_helium(:,:,:)
     REAL(prec), ALLOCATABLE :: geo_oxygen(:,:,:)
@@ -49,7 +55,9 @@ MODULE IPE_Neutrals_Class
       ! PRIVATE Routines
       PROCEDURE, PRIVATE :: IPE_Neutrals_Empirical
       PROCEDURE, PRIVATE :: IPE_Neutrals_Extrapolate
+      PROCEDURE, PRIVATE :: IPE_Neutrals_SetTempInf
       PROCEDURE, PRIVATE :: Geographic_to_Apex_Velocity
+      PROCEDURE, PRIVATE :: Geographic_to_Apex_Neutrals
 
   END TYPE IPE_Neutrals
 
@@ -188,6 +196,11 @@ CONTAINS
                  stat=stat )
     IF ( ipe_dealloc_check( stat, line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 
+    ! Clean up file reader if it was initialized
+    IF ( neutrals % file_reader % initialized ) THEN
+      CALL neutrals % file_reader % Finalize( )
+    ENDIF
+
   END SUBROUTINE Trash_IPE_Neutrals
 
 
@@ -209,6 +222,10 @@ CONTAINS
 
     IF ( PRESENT( rc ) ) rc = IPE_SUCCESS
 
+    ! --- MSIS for empirical neutral atmosphere ---
+    ! Run MSIS FIRST so it fills He, H, N (which FileReader doesn't provide).
+    ! When read_gsm_neutrals is enabled, FileReader runs AFTER and overwrites
+    ! T, O, O2, N2, winds — preventing MSIS from discarding file-based neutrals.
     msis_switch = mod(time % elapsed_sec,params % msis_time_step) == 0.0
 
     IF ( msis_switch .and. (time % elapsed_sec > 0._prec .or. .NOT. params % read_apex_neutrals) ) THEN
@@ -217,7 +234,147 @@ CONTAINS
       IF ( ipe_error_check( localrc, msg="call to IPE_Neutrals_Empirical failed", rc=rc ) ) RETURN
     ENDIF
 
-    CALL neutrals % IPE_Neutrals_Extrapolate( grid, forcing )
+    ! --- Read neutrals from GSM files if enabled ---
+    ! This runs AFTER MSIS so that file-based T, O, O2, N2, winds override
+    ! the MSIS/HWM values. MSIS-provided He, H, N are preserved.
+    IF ( params % read_gsm_neutrals ) THEN
+
+      ! Initialize file reader on first call
+      IF ( .NOT. neutrals % file_reader % initialized ) THEN
+        CALL neutrals % file_reader % Init( &
+             TRIM(params % gsm_neutrals_dir), &
+             time % year, time % month, time % day, &
+             mpi_layer, &
+             interp_method=TRIM(params % neutral_interp_method), &
+             rc=localrc )
+        IF ( ipe_error_check( localrc, msg="FileReader Init failed", rc=rc ) ) RETURN
+
+        ! For high-res source grids, enable direct-to-apex interpolation
+        IF ( neutrals % file_reader % needs_horiz_interp ) THEN
+          CALL neutrals % file_reader % InitApexWeights( grid, mpi_layer, localrc )
+          IF ( ipe_error_check( localrc, msg="FileReader InitApexWeights failed", rc=rc ) ) RETURN
+        ENDIF
+      ENDIF
+
+      IF ( neutrals % file_reader % direct_apex_interp ) THEN
+        ! === Direct-to-apex path (high-res source, e.g. FV3WAM 384x190) ===
+        ! Interpolate source data directly to apex grid points,
+        ! bypassing the 90x91 geographic grid bottleneck
+        CALL neutrals % file_reader % UpdateApex( time, mpi_layer, &
+             neutrals % temperature, &
+             neutrals % oxygen, &
+             neutrals % molecular_oxygen, &
+             neutrals % molecular_nitrogen, &
+             neutrals % velocity_geographic, &
+             rc=localrc )
+        IF ( ipe_error_check( localrc, msg="FileReader UpdateApex failed", rc=rc ) ) RETURN
+
+        ! Diagnostic: check apex array ranges (rank 0 only)
+        IF ( mpi_layer % rank_id == 0 .AND. verbose_diag ) THEN
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' Apex(direct) T    min/max: ', &
+            MINVAL(neutrals % temperature(:,:,grid%mp_low:grid%mp_high)), ' / ', &
+            MAXVAL(neutrals % temperature(:,:,grid%mp_low:grid%mp_high))
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' Apex(direct) O    min/max: ', &
+            MINVAL(neutrals % oxygen(:,:,grid%mp_low:grid%mp_high)), ' / ', &
+            MAXVAL(neutrals % oxygen(:,:,grid%mp_low:grid%mp_high))
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' Apex(direct) O2   min/max: ', &
+            MINVAL(neutrals % molecular_oxygen(:,:,grid%mp_low:grid%mp_high)), ' / ', &
+            MAXVAL(neutrals % molecular_oxygen(:,:,grid%mp_low:grid%mp_high))
+        ENDIF
+
+        ! Apply min_density floor matching IPE_Neutrals_Extrapolate (1e-12).
+        ! VertInterpColumn uses 1e-30 floor, but for plasmaspheric kp (above
+        ! ~2000 km) constant-G0 scale-height gives densities << 1e-12.
+        ! FLIP requires densities >= min_density to avoid NaN in rate equations.
+        WHERE (neutrals % oxygen         (1:grid%nFluxTube, 1:grid%NLP, grid%mp_low:grid%mp_high) < min_density)
+          neutrals % oxygen         (1:grid%nFluxTube, 1:grid%NLP, grid%mp_low:grid%mp_high) = min_density
+        END WHERE
+        WHERE (neutrals % molecular_oxygen (1:grid%nFluxTube, 1:grid%NLP, grid%mp_low:grid%mp_high) < min_density)
+          neutrals % molecular_oxygen (1:grid%nFluxTube, 1:grid%NLP, grid%mp_low:grid%mp_high) = min_density
+        END WHERE
+        WHERE (neutrals % molecular_nitrogen(1:grid%nFluxTube, 1:grid%NLP, grid%mp_low:grid%mp_high) < min_density)
+          neutrals % molecular_nitrogen(1:grid%nFluxTube, 1:grid%NLP, grid%mp_low:grid%mp_high) = min_density
+        END WHERE
+
+        ! Skip Geographic_to_Apex_Neutrals — data is already on apex grid
+
+      ELSE
+        ! === Legacy path (90x91 GSM files) ===
+        ! Read and interpolate GSM data to geographic grid
+        CALL neutrals % file_reader % Update( time, mpi_layer, &
+             neutrals % geo_temperature, &
+             neutrals % geo_oxygen, &
+             neutrals % geo_molecular_oxygen, &
+             neutrals % geo_molecular_nitrogen, &
+             neutrals % geo_velocity, &
+             grid % altitude_geo, &
+             forcing=forcing, &
+             rc=localrc )
+        IF ( ipe_error_check( localrc, msg="FileReader Update failed", rc=rc ) ) RETURN
+
+        ! Diagnostic: check geo array ranges (rank 0 only)
+        IF ( mpi_layer % rank_id == 0 .AND. verbose_diag ) THEN
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' FileReader geo_T    min/max: ', &
+            MINVAL(neutrals % geo_temperature), ' / ', MAXVAL(neutrals % geo_temperature)
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' FileReader geo_O    min/max: ', &
+            MINVAL(neutrals % geo_oxygen), ' / ', MAXVAL(neutrals % geo_oxygen)
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' FileReader geo_O2   min/max: ', &
+            MINVAL(neutrals % geo_molecular_oxygen), ' / ', MAXVAL(neutrals % geo_molecular_oxygen)
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' FileReader geo_N2   min/max: ', &
+            MINVAL(neutrals % geo_molecular_nitrogen), ' / ', MAXVAL(neutrals % geo_molecular_nitrogen)
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' FileReader geo_Ue   min/max: ', &
+            MINVAL(neutrals % geo_velocity(1,:,:,:)), ' / ', MAXVAL(neutrals % geo_velocity(1,:,:,:))
+        ENDIF
+
+        ! Interpolate geographic grid -> apex grid
+        CALL neutrals % Geographic_to_Apex_Neutrals( grid )
+
+        ! Diagnostic: check apex array ranges after interpolation (rank 0 only)
+        IF ( mpi_layer % rank_id == 0 .AND. verbose_diag ) THEN
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' Apex T    min/max: ', &
+            MINVAL(neutrals % temperature(:,:,grid%mp_low:grid%mp_high)), ' / ', &
+            MAXVAL(neutrals % temperature(:,:,grid%mp_low:grid%mp_high))
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' Apex O    min/max: ', &
+            MINVAL(neutrals % oxygen(:,:,grid%mp_low:grid%mp_high)), ' / ', &
+            MAXVAL(neutrals % oxygen(:,:,grid%mp_low:grid%mp_high))
+          WRITE(6,'(A,ES12.4,A,ES12.4)') ' Apex O2   min/max: ', &
+            MINVAL(neutrals % molecular_oxygen(:,:,grid%mp_low:grid%mp_high)), ' / ', &
+            MAXVAL(neutrals % molecular_oxygen(:,:,grid%mp_low:grid%mp_high))
+        ENDIF
+
+      ENDIF  ! direct_apex_interp
+
+      ! Apply neutral scaling factors (from NeutralFileIO namelist)
+      IF ( params % neutral_T_scale /= 1.0_prec ) &
+        neutrals % temperature(:,:,grid%mp_low:grid%mp_high) = &
+          neutrals % temperature(:,:,grid%mp_low:grid%mp_high) * params % neutral_T_scale
+      IF ( params % neutral_O_scale /= 1.0_prec ) &
+        neutrals % oxygen(:,:,grid%mp_low:grid%mp_high) = &
+          neutrals % oxygen(:,:,grid%mp_low:grid%mp_high) * params % neutral_O_scale
+      IF ( params % neutral_O2_scale /= 1.0_prec ) &
+        neutrals % molecular_oxygen(:,:,grid%mp_low:grid%mp_high) = &
+          neutrals % molecular_oxygen(:,:,grid%mp_low:grid%mp_high) * params % neutral_O2_scale
+      IF ( params % neutral_N2_scale /= 1.0_prec ) &
+        neutrals % molecular_nitrogen(:,:,grid%mp_low:grid%mp_high) = &
+          neutrals % molecular_nitrogen(:,:,grid%mp_low:grid%mp_high) * params % neutral_N2_scale
+
+      IF ( verbose_diag .AND. mpi_layer % rank_id == 0 .AND. &
+           mod(time % elapsed_sec, 3600.0_prec) == 0.0_prec ) &
+        WRITE(6,'(A,4F8.3)') ' Neutral scaling T/O/O2/N2: ', &
+          params % neutral_T_scale, params % neutral_O_scale, &
+          params % neutral_O2_scale, params % neutral_N2_scale
+
+    ENDIF
+
+    IF ( params % read_gsm_neutrals .AND. &
+         neutrals % file_reader % direct_apex_interp ) THEN
+      ! Direct-apex path: FileReader already handles above-top extrapolation
+      ! via VertInterpColumn (isothermal for T/winds, scale-height for densities).
+      ! Only compute temperature_inf; skip overwriting T/O/O2/N2/winds.
+      CALL neutrals % IPE_Neutrals_SetTempInf( grid )
+    ELSE
+      CALL neutrals % IPE_Neutrals_Extrapolate( grid, forcing )
+    ENDIF
 
     CALL neutrals % Geographic_to_Apex_Velocity( grid, vertical_wind_limit )
 
@@ -295,6 +452,29 @@ CONTAINS
     ENDDO
 
   END SUBROUTINE IPE_Neutrals_Extrapolate
+
+
+  !---------------------------------------------------------------------------
+  ! IPE_Neutrals_SetTempInf: Set exospheric temperature only.
+  ! Used when FileReader direct-apex path provides all other neutrals.
+  !---------------------------------------------------------------------------
+  SUBROUTINE IPE_Neutrals_SetTempInf( neutrals, grid )
+
+    CLASS( IPE_Neutrals ), INTENT(inout) :: neutrals
+    TYPE( IPE_Grid ),      INTENT(in)    :: grid
+
+    INTEGER :: lp, mp
+
+    DO mp = grid % mp_low, grid % mp_high
+      DO lp = 1, grid % NLP
+        neutrals % temperature_inf(1:grid % flux_tube_midpoint(lp),lp,mp) = &
+          neutrals % temperature(grid % northern_top_index(lp),lp,mp)
+        neutrals % temperature_inf(grid % flux_tube_midpoint(lp)+1:grid % flux_tube_max(lp),lp,mp) = &
+          neutrals % temperature(grid % southern_top_index(lp),lp,mp)
+      ENDDO
+    ENDDO
+
+  END SUBROUTINE IPE_Neutrals_SetTempInf
 
 
   SUBROUTINE IPE_Neutrals_Empirical( neutrals, grid, time, forcing, rc )
@@ -488,6 +668,185 @@ CONTAINS
     END DO
 
   END SUBROUTINE Geographic_to_Apex_Velocity
+
+
+  !---------------------------------------------------------------------------
+  ! Geographic_to_Apex_Neutrals: Interpolate neutral scalar fields and winds
+  ! from the regular geographic grid (geo_*) to apex grid points using
+  ! trilinear interpolation.
+  !---------------------------------------------------------------------------
+  SUBROUTINE Geographic_to_Apex_Neutrals( neutrals, grid )
+
+    IMPLICIT NONE
+
+    CLASS( IPE_Neutrals ), INTENT(inout) :: neutrals
+    TYPE( IPE_Grid ),      INTENT(in)    :: grid
+
+    ! Local
+    INTEGER    :: kp, lp, mp
+    REAL(prec) :: geo_lon, geo_lat, geo_alt
+    REAL(prec) :: fi, fj, fk
+    INTEGER    :: i0, j0, k0, i1, j1, k1
+    REAL(prec) :: wi, wj, wk
+    REAL(prec) :: dlon, dlat, dalt
+    REAL(prec) :: c000, c100, c010, c110, c001, c101, c011, c111
+    REAL(prec) :: log000, log100, log010, log110, log001, log101, log011, log111
+
+    ! Geographic grid spacing
+    dlon = 360.0_prec / REAL(nlon_geo, prec)   ! 4 degrees
+    dlat = 180.0_prec / REAL(nlat_geo - 1, prec)  ! 2 degrees
+    dalt = 5.0_prec  ! km
+
+    DO mp = grid % mp_low, grid % mp_high
+      DO lp = 1, grid % NLP
+        DO kp = 1, grid % flux_tube_max(lp)
+
+          ! Get geographic coordinates of this apex grid point
+          geo_lon = rtd * grid % longitude(kp,lp,mp)          ! degrees (0-360)
+          geo_lat = 90.0_prec - rtd * grid % colatitude(kp,lp,mp)  ! degrees (-90 to 90)
+          geo_alt = m_to_km * grid % altitude(kp,lp)          ! km
+
+          ! Fractional indices into regular geographic grid
+          ! lon: 0 to 356 at 4 deg spacing
+          fi = geo_lon / dlon
+          ! lat: -90 to 90 at 2 deg spacing
+          fj = (geo_lat + 90.0_prec) / dlat
+          ! alt: 90 to 1000 at 5 km spacing — clamp to grid range
+          ! (out-of-range points get nearest boundary value;
+          !  IPE_Neutrals_Extrapolate will properly extend along field lines)
+          fk = (MAX(90.0_prec, MIN(geo_alt, 1000.0_prec)) - 90.0_prec) / dalt
+
+          ! Integer indices (1-based)
+          i0 = INT(fi) + 1
+          j0 = INT(fj) + 1
+          k0 = INT(fk) + 1
+
+          ! Weights (fractional part)
+          wi = fi - REAL(i0 - 1, prec)
+          wj = fj - REAL(j0 - 1, prec)
+          wk = fk - REAL(k0 - 1, prec)
+
+          ! Neighbor indices with bounds checking
+          i1 = MOD(i0, nlon_geo) + 1  ! wrap longitude
+          j0 = MAX(1, MIN(j0, nlat_geo - 1))
+          j1 = j0 + 1
+          k0 = MAX(1, MIN(k0, nheights_geo - 1))
+          k1 = k0 + 1
+
+          ! Clamp i0 to valid range
+          i0 = MAX(1, MIN(i0, nlon_geo))
+
+          ! --- Temperature: trilinear interpolation ---
+          c000 = neutrals % geo_temperature(i0,j0,k0)
+          c100 = neutrals % geo_temperature(i1,j0,k0)
+          c010 = neutrals % geo_temperature(i0,j1,k0)
+          c110 = neutrals % geo_temperature(i1,j1,k0)
+          c001 = neutrals % geo_temperature(i0,j0,k1)
+          c101 = neutrals % geo_temperature(i1,j0,k1)
+          c011 = neutrals % geo_temperature(i0,j1,k1)
+          c111 = neutrals % geo_temperature(i1,j1,k1)
+          neutrals % temperature(kp,lp,mp) = &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*c000 + wi*c100) &
+                          +           wj *((1.0_prec-wi)*c010 + wi*c110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*c001 + wi*c101) &
+                          +           wj *((1.0_prec-wi)*c011 + wi*c111))
+
+          ! --- Oxygen: trilinear in log-space ---
+          log000 = LOG(MAX(neutrals % geo_oxygen(i0,j0,k0), 1.0e-30_prec))
+          log100 = LOG(MAX(neutrals % geo_oxygen(i1,j0,k0), 1.0e-30_prec))
+          log010 = LOG(MAX(neutrals % geo_oxygen(i0,j1,k0), 1.0e-30_prec))
+          log110 = LOG(MAX(neutrals % geo_oxygen(i1,j1,k0), 1.0e-30_prec))
+          log001 = LOG(MAX(neutrals % geo_oxygen(i0,j0,k1), 1.0e-30_prec))
+          log101 = LOG(MAX(neutrals % geo_oxygen(i1,j0,k1), 1.0e-30_prec))
+          log011 = LOG(MAX(neutrals % geo_oxygen(i0,j1,k1), 1.0e-30_prec))
+          log111 = LOG(MAX(neutrals % geo_oxygen(i1,j1,k1), 1.0e-30_prec))
+          neutrals % oxygen(kp,lp,mp) = EXP( &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*log000 + wi*log100) &
+                          +           wj *((1.0_prec-wi)*log010 + wi*log110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*log001 + wi*log101) &
+                          +           wj *((1.0_prec-wi)*log011 + wi*log111)) )
+
+          ! --- Molecular oxygen: trilinear in log-space ---
+          log000 = LOG(MAX(neutrals % geo_molecular_oxygen(i0,j0,k0), 1.0e-30_prec))
+          log100 = LOG(MAX(neutrals % geo_molecular_oxygen(i1,j0,k0), 1.0e-30_prec))
+          log010 = LOG(MAX(neutrals % geo_molecular_oxygen(i0,j1,k0), 1.0e-30_prec))
+          log110 = LOG(MAX(neutrals % geo_molecular_oxygen(i1,j1,k0), 1.0e-30_prec))
+          log001 = LOG(MAX(neutrals % geo_molecular_oxygen(i0,j0,k1), 1.0e-30_prec))
+          log101 = LOG(MAX(neutrals % geo_molecular_oxygen(i1,j0,k1), 1.0e-30_prec))
+          log011 = LOG(MAX(neutrals % geo_molecular_oxygen(i0,j1,k1), 1.0e-30_prec))
+          log111 = LOG(MAX(neutrals % geo_molecular_oxygen(i1,j1,k1), 1.0e-30_prec))
+          neutrals % molecular_oxygen(kp,lp,mp) = EXP( &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*log000 + wi*log100) &
+                          +           wj *((1.0_prec-wi)*log010 + wi*log110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*log001 + wi*log101) &
+                          +           wj *((1.0_prec-wi)*log011 + wi*log111)) )
+
+          ! --- Molecular nitrogen: trilinear in log-space ---
+          log000 = LOG(MAX(neutrals % geo_molecular_nitrogen(i0,j0,k0), 1.0e-30_prec))
+          log100 = LOG(MAX(neutrals % geo_molecular_nitrogen(i1,j0,k0), 1.0e-30_prec))
+          log010 = LOG(MAX(neutrals % geo_molecular_nitrogen(i0,j1,k0), 1.0e-30_prec))
+          log110 = LOG(MAX(neutrals % geo_molecular_nitrogen(i1,j1,k0), 1.0e-30_prec))
+          log001 = LOG(MAX(neutrals % geo_molecular_nitrogen(i0,j0,k1), 1.0e-30_prec))
+          log101 = LOG(MAX(neutrals % geo_molecular_nitrogen(i1,j0,k1), 1.0e-30_prec))
+          log011 = LOG(MAX(neutrals % geo_molecular_nitrogen(i0,j1,k1), 1.0e-30_prec))
+          log111 = LOG(MAX(neutrals % geo_molecular_nitrogen(i1,j1,k1), 1.0e-30_prec))
+          neutrals % molecular_nitrogen(kp,lp,mp) = EXP( &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*log000 + wi*log100) &
+                          +           wj *((1.0_prec-wi)*log010 + wi*log110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*log001 + wi*log101) &
+                          +           wj *((1.0_prec-wi)*log011 + wi*log111)) )
+
+          ! --- Winds: trilinear interpolation (3 components) ---
+          ! Eastward
+          c000 = neutrals % geo_velocity(1,i0,j0,k0)
+          c100 = neutrals % geo_velocity(1,i1,j0,k0)
+          c010 = neutrals % geo_velocity(1,i0,j1,k0)
+          c110 = neutrals % geo_velocity(1,i1,j1,k0)
+          c001 = neutrals % geo_velocity(1,i0,j0,k1)
+          c101 = neutrals % geo_velocity(1,i1,j0,k1)
+          c011 = neutrals % geo_velocity(1,i0,j1,k1)
+          c111 = neutrals % geo_velocity(1,i1,j1,k1)
+          neutrals % velocity_geographic(1,kp,lp,mp) = &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*c000 + wi*c100) &
+                          +           wj *((1.0_prec-wi)*c010 + wi*c110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*c001 + wi*c101) &
+                          +           wj *((1.0_prec-wi)*c011 + wi*c111))
+
+          ! Northward
+          c000 = neutrals % geo_velocity(2,i0,j0,k0)
+          c100 = neutrals % geo_velocity(2,i1,j0,k0)
+          c010 = neutrals % geo_velocity(2,i0,j1,k0)
+          c110 = neutrals % geo_velocity(2,i1,j1,k0)
+          c001 = neutrals % geo_velocity(2,i0,j0,k1)
+          c101 = neutrals % geo_velocity(2,i1,j0,k1)
+          c011 = neutrals % geo_velocity(2,i0,j1,k1)
+          c111 = neutrals % geo_velocity(2,i1,j1,k1)
+          neutrals % velocity_geographic(2,kp,lp,mp) = &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*c000 + wi*c100) &
+                          +           wj *((1.0_prec-wi)*c010 + wi*c110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*c001 + wi*c101) &
+                          +           wj *((1.0_prec-wi)*c011 + wi*c111))
+
+          ! Upward
+          c000 = neutrals % geo_velocity(3,i0,j0,k0)
+          c100 = neutrals % geo_velocity(3,i1,j0,k0)
+          c010 = neutrals % geo_velocity(3,i0,j1,k0)
+          c110 = neutrals % geo_velocity(3,i1,j1,k0)
+          c001 = neutrals % geo_velocity(3,i0,j0,k1)
+          c101 = neutrals % geo_velocity(3,i1,j0,k1)
+          c011 = neutrals % geo_velocity(3,i0,j1,k1)
+          c111 = neutrals % geo_velocity(3,i1,j1,k1)
+          neutrals % velocity_geographic(3,kp,lp,mp) = &
+            (1.0_prec-wk)*((1.0_prec-wj)*((1.0_prec-wi)*c000 + wi*c100) &
+                          +           wj *((1.0_prec-wi)*c010 + wi*c110)) &
+           +          wk *((1.0_prec-wj)*((1.0_prec-wi)*c001 + wi*c101) &
+                          +           wj *((1.0_prec-wi)*c011 + wi*c111))
+
+        ENDDO  ! kp
+      ENDDO    ! lp
+    ENDDO      ! mp
+
+  END SUBROUTINE Geographic_to_Apex_Neutrals
 
 
 END MODULE IPE_Neutrals_Class

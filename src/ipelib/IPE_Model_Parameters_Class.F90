@@ -73,6 +73,15 @@ MODULE IPE_Model_Parameters_Class
     !ElDyn
     LOGICAL :: dynamo_efield
 
+    ! NeutralFileIO
+    LOGICAL        :: read_gsm_neutrals
+    CHARACTER(512) :: gsm_neutrals_dir
+    CHARACTER(32)  :: neutral_interp_method
+    REAL(prec)     :: neutral_T_scale
+    REAL(prec)     :: neutral_O_scale
+    REAL(prec)     :: neutral_O2_scale
+    REAL(prec)     :: neutral_N2_scale
+
     INTEGER :: n_model_updates
 
     ! >> Operations
@@ -131,6 +140,15 @@ CONTAINS
     INTEGER        :: mesh_write
     CHARACTER(200) :: mesh_write_file
     LOGICAL        :: dynamo_efield
+    ! NeutralFileIO locals
+    LOGICAL        :: read_gsm_neutrals
+    CHARACTER(512) :: gsm_neutrals_dir
+    LOGICAL        :: verbose_diag_local
+    CHARACTER(32)  :: neutral_interp_method
+    REAL(prec)     :: neutral_T_scale
+    REAL(prec)     :: neutral_O_scale
+    REAL(prec)     :: neutral_O2_scale
+    REAL(prec)     :: neutral_N2_scale
     ! >> Fixed parameters
     REAL(prec) :: f107
     REAL(prec) :: f107_81day_avg
@@ -161,8 +179,8 @@ CONTAINS
     REAL(prec) :: vertical_wind_limit
 
     ! Communication buffers
-    CHARACTER(LEN=200), DIMENSION( 6) :: sbuf
-    INTEGER,            DIMENSION(24) :: ibuf
+    CHARACTER(LEN=512), DIMENSION( 8) :: sbuf
+    INTEGER,            DIMENSION(26) :: ibuf
     REAL(prec),         DIMENSION(26) :: rbuf
 
 
@@ -179,6 +197,8 @@ CONTAINS
     NAMELIST / ElDyn           / dynamo_efield
     NAMELIST / OPERATIONAL     / colfac, offset1_deg, offset2_deg, potential_model, hpeq, &
                                  transport_highlat_lp, perp_transport_max_lp, vertical_wind_limit
+    NAMELIST / NeutralFileIO  / read_gsm_neutrals, gsm_neutrals_dir, verbose_diag_local, neutral_interp_method, &
+                                neutral_T_scale, neutral_O_scale, neutral_O2_scale, neutral_N2_scale
 
     ! Begin
     IF (PRESENT(rc)) rc = IPE_SUCCESS
@@ -256,6 +276,16 @@ CONTAINS
     perp_transport_max_lp = 151
     vertical_wind_limit   = 100.0_prec
 
+    ! NeutralFileIO defaults
+    read_gsm_neutrals = .FALSE.
+    gsm_neutrals_dir  = './'
+    verbose_diag_local = .FALSE.
+    neutral_interp_method = 'linear'
+    neutral_T_scale  = 1.0_prec
+    neutral_O_scale  = 1.0_prec
+    neutral_O2_scale = 1.0_prec
+    neutral_N2_scale = 1.0_prec
+
     ! Initialize buffers
     sbuf = ""
     ibuf = 0
@@ -298,6 +328,14 @@ CONTAINS
       READ( UNIT = fUnit, NML = Operational,     IOSTAT = iostatus )
       IF ( ipe_iostatus_check( iostatus, line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 
+      ! NeutralFileIO is optional — don't fail if not present
+      REWIND( UNIT = fUnit, IOSTAT = iostatus )
+      READ( UNIT = fUnit, NML = NeutralFileIO, IOSTAT = iostatus )
+      IF ( iostatus > 0 ) THEN
+        ! Positive iostatus = read error (not just missing namelist)
+        IF ( ipe_iostatus_check( iostatus, line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
+      ENDIF
+
       CLOSE( fUnit, IOSTAT = iostatus )
       IF ( ipe_iostatus_check( iostatus, line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 
@@ -309,7 +347,14 @@ CONTAINS
 
       ! prepare buffers
       ! -- strings
-      sbuf = (/ grid_file, initial_timestamp, f107_kp_file, mesh_write_file, file_prefix, file_extension /)
+      sbuf(1) = grid_file
+      sbuf(2) = initial_timestamp
+      sbuf(3) = f107_kp_file
+      sbuf(4) = mesh_write_file
+      sbuf(5) = file_prefix
+      sbuf(6) = file_extension
+      sbuf(7) = gsm_neutrals_dir
+      sbuf(8) = neutral_interp_method
       ! -- integers
       ibuf(1:13) = (/ f107_kp_size, f107_kp_interval, f107_kp_skip_size, f107_kp_realtime_interval, &
                       f107_kp_data_size, f107_kp_read_in_start, mesh_fill, mesh_write, &
@@ -327,6 +372,8 @@ CONTAINS
       ibuf(22) = potential_model
       ibuf(23) = transport_highlat_lp
       ibuf(24) = perp_transport_max_lp
+      IF ( read_gsm_neutrals ) ibuf(25) = 1
+      IF ( verbose_diag_local ) ibuf(26) = 1
 
       ! -- reals
       rbuf = (/ time_step, start_time, end_time, msis_time_step, solar_forcing_time_step, &
@@ -338,7 +385,7 @@ CONTAINS
     ENDIF
 
 #ifdef HAVE_MPI
-    CALL MPI_BCAST( sbuf, 200 * size(sbuf), MPI_CHAR, 0, mpi_layer % mpi_communicator, ierr )
+    CALL MPI_BCAST( sbuf, 512 * size(sbuf), MPI_CHAR, 0, mpi_layer % mpi_communicator, ierr )
     IF ( ipe_status_check( ierr == 0, line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 #endif
 
@@ -348,6 +395,8 @@ CONTAINS
     params % mesh_write_file   = sbuf(4)
     params % file_prefix       = sbuf(5)
     params % file_extension    = sbuf(6)
+    params % gsm_neutrals_dir       = sbuf(7)
+    params % neutral_interp_method  = TRIM(sbuf(8))
 
 #ifdef HAVE_MPI
     CALL MPI_BCAST( ibuf, size(ibuf), MPI_INTEGER, 0, mpi_layer % mpi_communicator, ierr )
@@ -378,6 +427,8 @@ CONTAINS
     params % potential_model           = ibuf(22)
     params % transport_highlat_lp      = ibuf(23)
     params % perp_transport_max_lp     = ibuf(24)
+    params % read_gsm_neutrals        = ( ibuf(25) == 1 )
+    verbose_diag = ( ibuf(26) == 1 )
 
 #ifdef HAVE_MPI
     CALL MPI_BCAST( rbuf, size(rbuf), mpi_layer % mpi_prec, 0, mpi_layer % mpi_communicator, ierr )
@@ -412,6 +463,26 @@ CONTAINS
     params % vertical_wind_limit     = rbuf(26)
 
     params % n_model_updates = INT( ( params % end_time - params % start_time ) / params % file_output_frequency )
+
+    ! Broadcast neutral scaling factors separately (avoid changing rbuf size)
+    block
+      REAL(prec) :: scale_buf(4)
+      scale_buf = (/ neutral_T_scale, neutral_O_scale, neutral_O2_scale, neutral_N2_scale /)
+#ifdef HAVE_MPI
+      CALL MPI_BCAST( scale_buf, 4, mpi_layer % mpi_prec, 0, mpi_layer % mpi_communicator, ierr )
+      IF ( ipe_status_check( ierr == 0, line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
+#endif
+      params % neutral_T_scale  = scale_buf(1)
+      params % neutral_O_scale  = scale_buf(2)
+      params % neutral_O2_scale = scale_buf(3)
+      params % neutral_N2_scale = scale_buf(4)
+
+      IF ( mpi_layer % rank_id == 0 .AND. &
+           (scale_buf(1)/=1.0_prec .OR. scale_buf(2)/=1.0_prec .OR. &
+            scale_buf(3)/=1.0_prec .OR. scale_buf(4)/=1.0_prec) ) THEN
+        WRITE(6,'(A,4F8.3)') ' Neutral scale factors T/O/O2/N2: ', scale_buf
+      ENDIF
+    end block
 
   END SUBROUTINE Build_IPE_Model_Parameters
 

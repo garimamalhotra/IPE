@@ -13,6 +13,7 @@ MODULE IPE_Model_Class
 
   USE COMIO
 
+  USE IPE_Constants_Dictionary, ONLY: verbose_diag   ! gates diagnostic output
 
   IMPLICIT NONE
 
@@ -213,6 +214,77 @@ CONTAINS
       IF ( ipe_error_check( localrc, msg="Failed to update neutrals", &
         line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 
+      ! NaN check on neutrals
+      IF ( verbose_diag ) THEN
+      block
+        integer :: n_nan_T, n_nan_O, n_nan_O2, n_nan_N2, n_nan_vel
+        n_nan_T = count(ipe%neutrals%temperature(:,:,ipe%grid%mp_low:ipe%grid%mp_high) /= &
+                        ipe%neutrals%temperature(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        n_nan_O = count(ipe%neutrals%oxygen(:,:,ipe%grid%mp_low:ipe%grid%mp_high) /= &
+                        ipe%neutrals%oxygen(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        n_nan_O2 = count(ipe%neutrals%molecular_oxygen(:,:,ipe%grid%mp_low:ipe%grid%mp_high) /= &
+                         ipe%neutrals%molecular_oxygen(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        n_nan_N2 = count(ipe%neutrals%molecular_nitrogen(:,:,ipe%grid%mp_low:ipe%grid%mp_high) /= &
+                         ipe%neutrals%molecular_nitrogen(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        n_nan_vel = count(ipe%neutrals%velocity_geographic(:,:,:,ipe%grid%mp_low:ipe%grid%mp_high) /= &
+                          ipe%neutrals%velocity_geographic(:,:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        if (n_nan_T + n_nan_O + n_nan_O2 + n_nan_N2 + n_nan_vel > 0) then
+          write(6,'(A,I4,A,5I8)') 'NaN AFTER NEUTRALS rank=', ipe%mpi_layer%rank_id, &
+            ' T/O/O2/N2/vel: ', n_nan_T, n_nan_O, n_nan_O2, n_nan_N2, n_nan_vel
+        endif
+        if (ipe%mpi_layer%rank_id == 0) then
+          write(6,'(A,2ES12.4)') 'DIAG neutrals T range: ', &
+            minval(ipe%neutrals%temperature(:,:,ipe%grid%mp_low:ipe%grid%mp_high)), &
+            maxval(ipe%neutrals%temperature(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+          write(6,'(A,2ES12.4)') 'DIAG neutrals O range: ', &
+            minval(ipe%neutrals%oxygen(:,:,ipe%grid%mp_low:ipe%grid%mp_high)), &
+            maxval(ipe%neutrals%oxygen(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+          ! geographic wind magnitude (1)=east, (2)=north, (3)=up
+          write(6,'(A,3ES12.4)') 'DIAG WIND max|vg(E/N/Up)|: ', &
+            maxval(abs(ipe%neutrals%velocity_geographic(1,:,:,ipe%grid%mp_low:ipe%grid%mp_high))), &
+            maxval(abs(ipe%neutrals%velocity_geographic(2,:,:,ipe%grid%mp_low:ipe%grid%mp_high))), &
+            maxval(abs(ipe%neutrals%velocity_geographic(3,:,:,ipe%grid%mp_low:ipe%grid%mp_high)))
+        endif
+      end block
+      ENDIF
+
+      ! EIA migration: O+ and neutrals at lp=90 over three altitudes
+      IF ( verbose_diag ) THEN
+      block
+        integer :: diag_lp, dmp, dkp
+        integer :: kp_lo, kp_mid, kp_hi
+        real(prec) :: op_lo, op_mid, op_hi
+        real(prec) :: neut_O_val, neut_T_val
+        real(prec) :: alt_lo, alt_mid, alt_hi
+        real(prec) :: geo_lon_deg
+        diag_lp = 90
+        ! low (~200km), mid (~350km), high (~500km) footpoint
+        kp_lo  = max(1, ipe%grid%flux_tube_max(diag_lp) / 6)
+        kp_mid = max(1, ipe%grid%flux_tube_max(diag_lp) / 4)
+        kp_hi  = max(1, ipe%grid%flux_tube_max(diag_lp) / 3)
+        alt_lo  = ipe%grid%altitude(kp_lo, diag_lp) * 1.0e-3_prec
+        alt_mid = ipe%grid%altitude(kp_mid, diag_lp) * 1.0e-3_prec
+        alt_hi  = ipe%grid%altitude(kp_hi, diag_lp) * 1.0e-3_prec
+        do dmp = ipe%grid%mp_low, ipe%grid%mp_high
+          op_lo  = ipe%plasma%ion_densities(1, kp_lo,  diag_lp, dmp)
+          op_mid = ipe%plasma%ion_densities(1, kp_mid, diag_lp, dmp)
+          op_hi  = ipe%plasma%ion_densities(1, kp_hi,  diag_lp, dmp)
+          neut_O_val = ipe%neutrals%oxygen(kp_mid, diag_lp, dmp)
+          neut_T_val = ipe%neutrals%temperature(kp_mid, diag_lp, dmp)
+          geo_lon_deg = 57.2957795_prec * ipe%grid%longitude(kp_mid, diag_lp, dmp)
+          write(6,'(A,I4,A,I3,A,3ES11.3,A,ES11.3,A,F7.1,A,F6.1)') &
+            'EIA_DIAG PRE rank=', ipe%mpi_layer%rank_id, &
+            ' mp=', dmp, &
+            ' O+(lo/mid/hi)=', op_lo, op_mid, op_hi, &
+            ' nO=', neut_O_val, ' nT=', neut_T_val, &
+            ' glon=', geo_lon_deg
+        enddo
+        if (ipe%mpi_layer%rank_id == 0) then
+          write(6,'(A,3F7.1)') 'EIA_DIAG altitudes(km) lo/mid/hi=', alt_lo, alt_mid, alt_hi
+        endif
+      end block
+      ENDIF
+
       CALL ipe % eldyn % Update( ipe % grid, &
                                  ipe % forcing, &
                                  ipe % time_tracker, &
@@ -224,6 +296,53 @@ CONTAINS
                                  rc = localrc )
       IF ( ipe_error_check( localrc, msg="Failed to update electrodynamics", &
         line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
+
+      ! NaN check on electrodynamics
+      IF ( verbose_diag ) THEN
+      block
+        integer :: n_nan_exb
+        n_nan_exb = count(ipe%eldyn%v_ExB_apex(:,:,ipe%grid%mp_low:ipe%grid%mp_high) /= &
+                          ipe%eldyn%v_ExB_apex(:,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        if (n_nan_exb > 0) then
+          write(6,'(A,I4,A,I8)') 'NaN AFTER ELDYN rank=', ipe%mpi_layer%rank_id, &
+            ' ExB: ', n_nan_exb
+        endif
+        if (ipe%mpi_layer%rank_id == 0) then
+          write(6,'(A,2ES12.4)') 'DIAG ExB(1) range: ', &
+            minval(ipe%eldyn%v_ExB_apex(1,:,ipe%grid%mp_low:ipe%grid%mp_high)), &
+            maxval(ipe%eldyn%v_ExB_apex(1,:,ipe%grid%mp_low:ipe%grid%mp_high))
+        endif
+      end block
+      ENDIF
+
+      ! EIA ExB at the crest and near the equator.
+      ! v_ExB_apex: (1)=zonal, (2)=meridional; geographic ExB gives vertical drift.
+      IF ( verbose_diag ) THEN
+      block
+        integer :: dmp, diag_lp_eia, diag_lp_eq, kp_eq
+        real(prec) :: exb_z90, exb_m90, exb_z_eq, exb_m_eq
+        real(prec) :: exb_geo_e, exb_geo_n, exb_geo_up
+        diag_lp_eia = 90   ! EIA crest (~19 deg mlat)
+        diag_lp_eq  = 150  ! near equator (~6 deg mlat)
+        ! kp at ~300 km footpoint for equatorial lp
+        kp_eq = max(1, ipe%grid%flux_tube_max(diag_lp_eq) / 4)
+        do dmp = ipe%grid%mp_low, ipe%grid%mp_high
+          exb_z90 = ipe%eldyn%v_ExB_apex(1, diag_lp_eia, dmp)
+          exb_m90 = ipe%eldyn%v_ExB_apex(2, diag_lp_eia, dmp)
+          exb_z_eq = ipe%eldyn%v_ExB_apex(1, diag_lp_eq, dmp)
+          exb_m_eq = ipe%eldyn%v_ExB_apex(2, diag_lp_eq, dmp)
+          exb_geo_e  = ipe%eldyn%v_ExB_geographic(1, kp_eq, diag_lp_eq, dmp)
+          exb_geo_n  = ipe%eldyn%v_ExB_geographic(2, kp_eq, diag_lp_eq, dmp)
+          exb_geo_up = ipe%eldyn%v_ExB_geographic(3, kp_eq, diag_lp_eq, dmp)
+          write(6,'(A,I4,A,I3,A,2F8.1,A,2F8.1,A,3F8.1)') &
+            'EIA_DIAG ExB rank=', ipe%mpi_layer%rank_id, &
+            ' mp=', dmp, &
+            ' lp90_z/m=', exb_z90, exb_m90, &
+            ' eq_z/m=', exb_z_eq, exb_m_eq, &
+            ' eq_geo_E/N/Up=', exb_geo_e, exb_geo_n, exb_geo_up
+        enddo
+      end block
+      ENDIF
 
       CALL ipe % plasma % Update( ipe % grid, &
                                   ipe % neutrals, &
@@ -239,6 +358,65 @@ CONTAINS
                                   rc = localrc )
       IF ( ipe_error_check( localrc, msg="Failed to update plasma", &
         line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
+
+      ! NaN check on plasma
+      IF ( verbose_diag ) THEN
+      block
+        integer :: n_nan_ion, n_nan_te, n_nan_ti
+        n_nan_ion = count(ipe%plasma%ion_densities(:,:,:,ipe%plasma%mp_low:ipe%plasma%mp_high) /= &
+                          ipe%plasma%ion_densities(:,:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+        n_nan_te = count(ipe%plasma%electron_temperature(:,:,ipe%plasma%mp_low:ipe%plasma%mp_high) /= &
+                         ipe%plasma%electron_temperature(:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+        n_nan_ti = count(ipe%plasma%ion_temperature(:,:,ipe%plasma%mp_low:ipe%plasma%mp_high) /= &
+                         ipe%plasma%ion_temperature(:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+        if (n_nan_ion + n_nan_te + n_nan_ti > 0) then
+          write(6,'(A,I4,A,3I8)') 'NaN AFTER PLASMA rank=', ipe%mpi_layer%rank_id, &
+            ' ion/Te/Ti: ', n_nan_ion, n_nan_te, n_nan_ti
+        endif
+        ! report the (kp,lp,mp) where O+ exceeds a physical ceiling (~1e13)
+        block
+          integer :: opl(3)
+          real(prec) :: opmax
+          opmax = maxval(ipe%plasma%ion_densities(1,:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+          if (opmax > 1.0e13_prec) then
+            opl = maxloc(ipe%plasma%ion_densities(1,:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+            write(6,'(A,I4,A,ES11.3,A,I4,A,I4,A,I3)') &
+              'DIAG OPLOC rank=', ipe%mpi_layer%rank_id, ' O+max=', opmax, &
+              ' kp=', opl(1), ' lp=', opl(2), ' mp=', opl(3)+ipe%plasma%mp_low-1
+          endif
+        end block
+        if (ipe%mpi_layer%rank_id == 0) then
+          write(6,'(A,2ES12.4)') 'DIAG O+ range: ', &
+            minval(ipe%plasma%ion_densities(1,:,:,ipe%plasma%mp_low:ipe%plasma%mp_high)), &
+            maxval(ipe%plasma%ion_densities(1,:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+          write(6,'(A,2ES12.4)') 'DIAG Te range: ', &
+            minval(ipe%plasma%electron_temperature(:,:,ipe%plasma%mp_low:ipe%plasma%mp_high)), &
+            maxval(ipe%plasma%electron_temperature(:,:,ipe%plasma%mp_low:ipe%plasma%mp_high))
+        endif
+      end block
+      ENDIF
+
+      ! EIA migration: O+ at lp=90 after plasma transport
+      IF ( verbose_diag ) THEN
+      block
+        integer :: diag_lp, dmp
+        integer :: kp_lo, kp_mid, kp_hi
+        real(prec) :: op_lo, op_mid, op_hi
+        diag_lp = 90
+        kp_lo  = max(1, ipe%grid%flux_tube_max(diag_lp) / 6)
+        kp_mid = max(1, ipe%grid%flux_tube_max(diag_lp) / 4)
+        kp_hi  = max(1, ipe%grid%flux_tube_max(diag_lp) / 3)
+        do dmp = ipe%grid%mp_low, ipe%grid%mp_high
+          op_lo  = ipe%plasma%ion_densities(1, kp_lo,  diag_lp, dmp)
+          op_mid = ipe%plasma%ion_densities(1, kp_mid, diag_lp, dmp)
+          op_hi  = ipe%plasma%ion_densities(1, kp_hi,  diag_lp, dmp)
+          write(6,'(A,I4,A,I3,A,3ES11.3)') &
+            'EIA_DIAG POST rank=', ipe%mpi_layer%rank_id, &
+            ' mp=', dmp, &
+            ' O+(lo/mid/hi)=', op_lo, op_mid, op_hi
+        enddo
+      end block
+      ENDIF
 
       ! Update the timer
       CALL ipe % time_tracker % Increment( ipe % parameters % time_step )
@@ -265,6 +443,8 @@ CONTAINS
     IF ( ipe_error_check( localrc, msg="Failed to read file "//filename, &
       line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 
+    ! Neutrals are filled by MSIS at the start of the time loop, so none are
+    ! initialized here; the first timestep uses zero-neutral conductivities.
     CALL ipe % plasma % Calculate_Field_Line_Integrals( ipe % grid, ipe % neutrals, ipe % parameters % colfac, ipe % mpi_layer )
 
   END SUBROUTINE Initialize_IPE_Model
@@ -516,6 +696,14 @@ CONTAINS
         "/apex/neutral_geographic_velocity3"  &
       /)
 
+    INTEGER, PARAMETER :: num_exb_datasets = 3
+    CHARACTER(LEN=*), DIMENSION(num_exb_datasets), PARAMETER :: exb_datasets = &
+      (/ &
+        "/apex/eastward_exb_velocity ", &
+        "/apex/northward_exb_velocity", &
+        "/apex/upward_exb_velocity   "  &
+      /)
+
     INTEGER :: item
     CHARACTER(LEN=28) :: dset_name
 
@@ -650,6 +838,15 @@ CONTAINS
           file=__FILE__, line=__LINE__)) RETURN
       END DO
     END IF
+
+    ! Write ExB drift velocities on geographic grid
+    DO item = 1, num_exb_datasets
+      CALL ipe % io % write(exb_datasets(item), &
+        ipe % eldyn % v_ExB_geographic(item,:,:, &
+        ipe % mpi_layer % mp_low:ipe % mpi_layer % mp_high))
+      IF (ipe % io % err % check(msg="Unable to write dataset "//exb_datasets(item), &
+        file=__FILE__, line=__LINE__)) RETURN
+    END DO
 
     ! Close HDF5 file
     CALL ipe % io % close()

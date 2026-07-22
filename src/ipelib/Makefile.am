@@ -5,8 +5,8 @@ lib_LIBRARIES = libipe.a
 libipe_a_SOURCES = IPE_Common_Routines.F90 IPE_Constants_Dictionary.F90 \
 	IPE_Electrodynamics_Class.F90 IPE_Forcing_Class.F90 \
 	IPE_Grid_Class.F90 IPE_Model_Class.F90 IPE_Model_Parameters_Class.F90 \
-	IPE_MPI_Layer_Class.F90 IPE_Neutrals_Class.F90 IPE_Plasma_Class.F90 \
-	IPE_Precision.F90 IPE_Time_Class.F90
+	IPE_MPI_Layer_Class.F90 IPE_Neutrals_Class.F90 IPE_Neutrals_FileReader.F90 \
+	IPE_Plasma_Class.F90 IPE_Precision.F90 IPE_Time_Class.F90
 
 libipe_a_FCFLAGS = $(FC_MODINC) . \
 	$(FC_MODINC) dynamo \
@@ -61,8 +61,15 @@ libipe_a-IPE_Model_Parameters_Class.$(OBJEXT): libipe_a-IPE_Common_Routines.$(OB
 
 libipe_a-IPE_MPI_Layer_Class.$(OBJEXT): libipe_a-IPE_Precision.$(OBJEXT)
 
+libipe_a-IPE_Neutrals_FileReader.$(OBJEXT): libipe_a-IPE_Precision.$(OBJEXT) \
+	libipe_a-IPE_Constants_Dictionary.$(OBJEXT) libipe_a-IPE_Time_Class.$(OBJEXT) \
+	libipe_a-IPE_MPI_Layer_Class.$(OBJEXT) libipe_a-IPE_Forcing_Class.$(OBJEXT) \
+	libipe_a-IPE_Grid_Class.$(OBJEXT)
+
 libipe_a-IPE_Neutrals_Class.$(OBJEXT): libipe_a-IPE_Constants_Dictionary.$(OBJEXT) \
 	libipe_a-IPE_Forcing_Class.$(OBJEXT) libipe_a-IPE_Grid_Class.$(OBJEXT) \
+	libipe_a-IPE_MPI_Layer_Class.$(OBJEXT) libipe_a-IPE_Model_Parameters_Class.$(OBJEXT) \
+	libipe_a-IPE_Neutrals_FileReader.$(OBJEXT) \
 	libipe_a-IPE_Precision.$(OBJEXT) libipe_a-IPE_Time_Class.$(OBJEXT)
 
 libipe_a-IPE_Plasma_Class.$(OBJEXT): libipe_a-IPE_Common_Routines.$(OBJEXT) \
