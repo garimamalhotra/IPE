@@ -936,8 +936,18 @@ CONTAINS
             mp_min = mp
           ELSEIF( phi_t0 <= grid % magnetic_longitude(mp+1) .AND. phi_t0 >= grid % magnetic_longitude(mp) )THEN
             mp_min = mp+1
+          ELSE
+            ! departure point is NaN or more than one cell away: skip the mp
+            ! convection for this tube (as done for lp in the limiter below)
+            mp_min = 0
           ENDIF
 
+          IF( mp_min == 0 )THEN
+            mp_t0(1) = mp
+            mp_t0(2) = mp
+            mp_comp_weight(1) = 0.0_prec
+            mp_comp_weight(2) = 1.0_prec
+          ELSE
           mp_t0(1) = mp_min-1
           mp_t0(2) = mp_min
 
@@ -945,6 +955,7 @@ CONTAINS
           phi_i(2) = grid % magnetic_longitude(mp_t0(2))
           mp_comp_weight(1) =  ( phi_t0 - phi_i(2) )/( phi_i(1)-phi_i(2) )
           mp_comp_weight(2) = -( phi_t0 - phi_i(1) )/( phi_i(1)-phi_i(2) )
+          ENDIF
 
           IF( lp_min == 1 )THEN  ! lp_min == 1
 
@@ -1054,6 +1065,16 @@ CONTAINS
                   electron_temperature_int = electron_temperature_int + e_temperature(lpx,mpx)*lp_comp_weight(lpx)*mp_comp_weight(mpx)
                 ENDDO
               ENDDO
+
+              ! fall back to the pre-transport values where the cross-tube
+              ! interpolation produced a NaN (e.g. a diverged plasmaspheric tube)
+              IF (ion_densities_int(1) /= ion_densities_int(1)) THEN
+                ion_densities_int(1:n_conv_spec) = plasma % ion_densities_old(1:n_conv_spec,i,lp,mp)
+                ion_velocities_int(1:n_conv_spec) = plasma % ion_velocities_old(1:n_conv_spec,i,lp,mp)
+                ion_temperature_int = plasma % ion_temperature_old(i,lp,mp)
+                electron_temperature_int = plasma % electron_temperature_old(i,lp,mp)
+                B_int = grid % magnetic_field_strength(i,lp,mp)
+              ENDIF
 
               IF( lp <= transport_highlat_lp )THEN
                 ksi_fac = 1.0_prec
@@ -1537,6 +1558,9 @@ CONTAINS
           ENDIF
 
           DO i=1, grid % flux_tube_max(lp)
+
+            ! skip this point if the field-line solver returned a NaN
+            IF (XIONNX(1,i) /= XIONNX(1,i) .OR. TE_TIX(1,i) /= TE_TIX(1,i)) CYCLE
 
             ! Ion Densities
             plasma % ion_densities(1:9,i,lp,mp) = XIONNX(1:9,i)
