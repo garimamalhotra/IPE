@@ -973,8 +973,8 @@ CONTAINS
               field_uw(nlon, nlat, nlev) )
 
     ! Rank 0 reads all fields from file
-    IF ( verbose_diag .AND. mpi_layer % rank_id == 0 ) THEN
-      WRITE(6,*) 'IPE_FileReader (apex): reading ', TRIM(filename)
+    IF ( mpi_layer % rank_id == 0 ) THEN
+      IF ( verbose_diag ) WRITE(6,*) 'IPE_FileReader (apex): reading ', TRIM(filename)
 
       localrc = nf90_open( TRIM(filename), NF90_NOWRITE, ncid )
       IF ( localrc /= NF90_NOERR ) THEN
