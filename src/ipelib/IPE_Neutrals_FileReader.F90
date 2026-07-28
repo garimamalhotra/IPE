@@ -751,11 +751,19 @@ CONTAINS
     file_month = reader % ref_month
     file_day   = reader % ref_day
     file_hour  = hour
-    IF ( file_hour >= 24 ) THEN
+    ! normalize hour -> day, then day -> month/year (handles month/year rollover)
+    DO WHILE ( file_hour >= 24 )
       file_hour = file_hour - 24
       file_day  = file_day + 1
-      ! Simple day rollover (does not handle month boundaries for now)
-    ENDIF
+    END DO
+    DO WHILE ( file_day > DaysInMonth( file_year, file_month ) )
+      file_day   = file_day - DaysInMonth( file_year, file_month )
+      file_month = file_month + 1
+      IF ( file_month > 12 ) THEN
+        file_month = 1
+        file_year  = file_year + 1
+      END IF
+    END DO
 
     CALL reader % BuildGSMFileName( file_year, file_month, file_day, file_hour, filename )
 
@@ -955,10 +963,19 @@ CONTAINS
     file_month = reader % ref_month
     file_day   = reader % ref_day
     file_hour  = hour
-    IF ( file_hour >= 24 ) THEN
+    ! normalize hour -> day, then day -> month/year (handles month/year rollover)
+    DO WHILE ( file_hour >= 24 )
       file_hour = file_hour - 24
       file_day  = file_day + 1
-    ENDIF
+    END DO
+    DO WHILE ( file_day > DaysInMonth( file_year, file_month ) )
+      file_day   = file_day - DaysInMonth( file_year, file_month )
+      file_month = file_month + 1
+      IF ( file_month > 12 ) THEN
+        file_month = 1
+        file_year  = file_year + 1
+      END IF
+    END DO
 
     CALL reader % BuildGSMFileName( file_year, file_month, file_day, file_hour, filename )
 
@@ -1356,6 +1373,17 @@ CONTAINS
     filename = TRIM(reader % file_dir) // '/gsm.' // date_str // '_' // time_str // '.nc'
 
   END SUBROUTINE BuildGSMFileName
+
+  !---------------------------------------------------------------------------
+  ! DaysInMonth: days in a given month, Gregorian leap years included.
+  !---------------------------------------------------------------------------
+  PURE INTEGER FUNCTION DaysInMonth( year, month )
+    INTEGER, INTENT(in) :: year, month
+    INTEGER, PARAMETER :: dim(12) = (/31,28,31,30,31,30,31,31,30,31,30,31/)
+    DaysInMonth = dim(month)
+    IF ( month == 2 .AND. MOD(year,4) == 0 .AND. &
+         ( MOD(year,100) /= 0 .OR. MOD(year,400) == 0 ) ) DaysInMonth = 29
+  END FUNCTION DaysInMonth
 
 
   !---------------------------------------------------------------------------
