@@ -278,7 +278,7 @@ CONTAINS
     ! Local
     INTEGER(8) :: month, year, day, adj_day, mi
 
-      year = (10000*time_tracker % day_number)/3652425
+      year = (10000*time_tracker % day_number + 14780)/3652425
       adj_day = time_tracker % day_number - (365*year + year/4 - year/100 + year/400)
 
       IF( adj_day < 0 )THEN
