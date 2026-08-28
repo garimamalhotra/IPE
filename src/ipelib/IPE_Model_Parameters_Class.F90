@@ -66,6 +66,7 @@ MODULE IPE_Model_Parameters_Class
     LOGICAL        :: write_geographic_neutrals
     LOGICAL        :: write_geographic_eldyn
     LOGICAL        :: write_apex_eldyn
+    LOGICAL        :: write_conductivities
     REAL(prec)     :: file_output_frequency
     CHARACTER(200) :: file_prefix
     CHARACTER(3)   :: file_extension
@@ -131,6 +132,7 @@ CONTAINS
     LOGICAL        :: write_geographic_neutrals
     LOGICAL        :: write_geographic_eldyn
     LOGICAL        :: write_apex_eldyn
+    LOGICAL        :: write_conductivities
     REAL(prec)     :: file_output_frequency
     CHARACTER(200) :: file_prefix
     CHARACTER(3)   :: file_extension
@@ -180,7 +182,7 @@ CONTAINS
 
     ! Communication buffers
     CHARACTER(LEN=512), DIMENSION( 8) :: sbuf
-    INTEGER,            DIMENSION(26) :: ibuf
+    INTEGER,            DIMENSION(27) :: ibuf
     REAL(prec),         DIMENSION(26) :: rbuf
 
 
@@ -192,7 +194,8 @@ CONTAINS
                                  nhemi_power_index, shemi_power, shemi_power_index, solarwind_By, solarwind_angle, &
                                  solarwind_velocity, solarwind_Bz, solarwind_density
     NAMELIST / FileIO          / read_apex_neutrals, read_geographic_neutrals, write_apex_neutrals, write_geographic_neutrals, &
-                                 write_geographic_eldyn, write_apex_eldyn, file_output_frequency, file_prefix, file_extension
+                                 write_geographic_eldyn, write_apex_eldyn, write_conductivities, file_output_frequency, &
+                                 file_prefix, file_extension
     NAMELIST / IPECAP          / mesh_height_min, mesh_height_max, mesh_fill, mesh_write, mesh_write_file
     NAMELIST / ElDyn           / dynamo_efield
     NAMELIST / OPERATIONAL     / colfac, offset1_deg, offset2_deg, potential_model, hpeq, &
@@ -252,6 +255,7 @@ CONTAINS
     write_geographic_neutrals = .TRUE.
     write_geographic_eldyn    = .TRUE.
     write_apex_eldyn          = .TRUE.
+    write_conductivities      = .FALSE.
     file_output_frequency     = 180.0_prec
     file_prefix               = "output/IPE_State.apex."
     file_extension            = ".h5"
@@ -374,6 +378,7 @@ CONTAINS
       ibuf(24) = perp_transport_max_lp
       IF ( read_gsm_neutrals ) ibuf(25) = 1
       IF ( verbose_diag_local ) ibuf(26) = 1
+      IF ( write_conductivities ) ibuf(27) = 1
 
       ! -- reals
       rbuf = (/ time_step, start_time, end_time, msis_time_step, solar_forcing_time_step, &
@@ -429,6 +434,7 @@ CONTAINS
     params % perp_transport_max_lp     = ibuf(24)
     params % read_gsm_neutrals        = ( ibuf(25) == 1 )
     verbose_diag = ( ibuf(26) == 1 )
+    params % write_conductivities     = ( ibuf(27) == 1 )
 
 #ifdef HAVE_MPI
     CALL MPI_BCAST( rbuf, size(rbuf), mpi_layer % mpi_prec, 0, mpi_layer % mpi_communicator, ierr )

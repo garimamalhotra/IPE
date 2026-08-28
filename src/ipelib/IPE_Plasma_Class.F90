@@ -159,7 +159,7 @@ CONTAINS
                 plasma % electron_density_old(1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 plasma % electron_velocity_old(1:3,1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 plasma % electron_temperature_old(1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
-                plasma % conductivities(1:6,1:2,1:NLP,1:NMP), &
+                plasma % conductivities(1:8,1:2,1:NLP,1:NMP), &
                 plasma % ionization_rates(1:4,1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 stat = stat )
       IF ( ipe_alloc_check( stat, msg="Failed to allocate plasma internal arrays", &
@@ -1661,10 +1661,27 @@ CONTAINS
     REAL(prec) ::  electron_density
     REAL(prec) ::  electron_charge_Coulombs
     REAL(prec) ::  sigma_ped,sigma_hall
+!202207
+    INTEGER    ::  j
+    REAL(prec) ::  amu
+    REAL(prec) ::  integral1, integral2
+    REAL(prec) ::  n1, n2, n3, m1, m2, m3, nm
+    REAL(prec) ::  e2g, be3, be3b
+    REAL(prec) ::  apex_e23, gravity, bstrength
+    REAL(prec) ::  pi
+    REAL(prec) ::  mlat(1, 1:170)
 #ifdef HAVE_MPI
     INTEGER :: mpierror, sendcount
-    REAL(prec) :: conductivities(1:6,1:2,1:grid % NLP, grid % mp_low:grid % mp_high)
+    REAL(prec) :: conductivities(1:8,1:2,1:grid % NLP, grid % mp_low:grid % mp_high)
 #endif
+
+   pi = 3.14159265358
+
+   DO j = 1, 170
+
+       mlat(1,j) = 90 - grid % magnetic_colatitude(1, j) * 180/pi
+
+   ENDDO
 
 ! Need to pick up only latitudes match dynamo grid for the calculation!
 
@@ -1689,6 +1706,9 @@ CONTAINS
           integral518=0.0_prec
           integral519=0.0_prec
           integral520=0.0_prec
+
+          integral1  =0.0_prec
+          integral2  =0.0_prec
 
           DO i = istart, istop, istep
 
@@ -1801,6 +1821,38 @@ CONTAINS
                integral520 = integral520 + ((sigma_hall+sigma_ped*apex_d1d2 &
      &               /apex_D )*Ue(2)- sigma_ped*apex_d2d2*Ue(1)/apex_D)*abs_ds
 
+!! ion mass (mi in the equation)
+
+                amu = 1.66E-27  ! kg
+
+                apex_e23 = grid % apex_e_vectors(3,2,i,lp,mp)
+
+                gravity = grid % grx(i,lp,mp) ! m/s^2
+
+                n1 = plasma % ion_densities(1,i,lp,mp) * 1e-6  ! #/cm^3
+                n2 = plasma % ion_densities(5,i,lp,mp) * 1e-6
+                n3 = plasma % ion_densities(6,i,lp,mp) * 1e-6
+
+                m1 = n1 * amu * 16
+                m2 = n2 * amu * 32
+                m3 = n3 * amu * 30
+
+                nm = n1*m1 + n2*m2 + n3*m3
+
+                e2g = apex_e23 * gravity
+                be3 = grid % apex_be3(lp,mp)
+
+                bstrength = grid % magnetic_field_strength(i,lp,mp)
+                bstrength = bstrength  ! Tesla
+
+                be3b = be3*bstrength
+
+               integral1 = integral1 + (sigma_ped*apex_d1d1*Ue(2)/apex_D &
+     &                 + (sigma_hall-sigma_ped*apex_d1d2/apex_D)*Ue(1) &
+     &                 + nm*e2g/be3b)*abs_ds
+
+               integral2 = integral2 + (nm*e2g)/bstrength*abs_ds
+
 ! inputs to the dynamo solver
 !               IF ( sw_3DJ==1 ) THEN
 ! calculation of Je1 and Je2, will be useful later
@@ -1858,6 +1910,12 @@ CONTAINS
             plasma % conductivities(6,ihem,lp,mp) = -grid % apex_be3(lp,mp)*integral520
           end if
 
+          !   The KDF and KGF
+
+            plasma % conductivities(7,ihem,lp,mp) = cos(mlat(1,lp) * pi/180) * grid % apex_be3(lp,mp)*integral1
+
+            plasma % conductivities(8,ihem,lp,mp) = cos(mlat(1,lp) * pi/180) * integral2
+
           ENDDO
         ENDDO
      ENDDO
@@ -1868,14 +1926,14 @@ CONTAINS
    DO mp = grid % mp_low , grid % mp_high
      DO lp = 1, grid % NLP
         DO ihem = 1, 2 
-           conductivities(1:6,ihem,lp,mp) = plasma % conductivities(1:6,ihem,lp,mp)
+           conductivities(1:8,ihem,lp,mp) = plasma % conductivities(1:8,ihem,lp,mp)
         ENDDO
      ENDDO
    ENDDO
 
    ! This AllGather requires that NMP is evenly divisible by the number of MPI ranks
-   sendcount = 6*2*grid % NLP*( grid % mp_high-grid % mp_low + 1 )
-   CALL MPI_Allgather( conductivities(1:6,1:2,1:grid % NLP,grid % mp_low:grid % mp_high), &
+   sendcount = 8*2*grid % NLP*( grid % mp_high-grid % mp_low + 1 )
+   CALL MPI_Allgather( conductivities(1:8,1:2,1:grid % NLP,grid % mp_low:grid % mp_high), &
                        sendcount,&
                        mpi_layer % mpi_prec,&
                        plasma % conductivities, &

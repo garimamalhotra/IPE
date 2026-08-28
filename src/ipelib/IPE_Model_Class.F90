@@ -443,9 +443,9 @@ CONTAINS
     IF ( ipe_error_check( localrc, msg="Failed to read file "//filename, &
       line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
 
-    ! Neutrals are filled by MSIS at the start of the time loop, so none are
-    ! initialized here; the first timestep uses zero-neutral conductivities.
-    CALL ipe % plasma % Calculate_Field_Line_Integrals( ipe % grid, ipe % neutrals, ipe % parameters % colfac, ipe % mpi_layer )
+    ! Field-line integrals (and the conductivities they populate) are computed
+    ! inside the time loop by Calculate_Field_Line_Integrals once MSIS has filled
+    ! the neutrals; do NOT call it here with zero-valued neutrals.
 
   END SUBROUTINE Initialize_IPE_Model
 
@@ -704,6 +704,26 @@ CONTAINS
         "/apex/upward_exb_velocity   "  &
       /)
 
+    INTEGER, PARAMETER :: num_conductivities = 8
+    CHARACTER(LEN=*), DIMENSION(num_conductivities), PARAMETER :: conductivities = &
+      (/ &
+        "/apex/integral513", &
+        "/apex/integral514", &
+        "/apex/integral517", &
+        "/apex/integral518", &
+        "/apex/integral519", &
+        "/apex/integral520", &
+        "/apex/integral1  ", &
+        "/apex/integral2  "  &
+      /)
+
+    INTEGER, PARAMETER :: num_elef = 2
+    CHARACTER(LEN=*), DIMENSION(num_elef), PARAMETER :: electric_field = &
+      (/ &
+        "/apex/Ed1", &
+        "/apex/Ed2"  &
+      /)
+
     INTEGER :: item
     CHARACTER(LEN=28) :: dset_name
 
@@ -847,6 +867,41 @@ CONTAINS
       IF (ipe % io % err % check(msg="Unable to write dataset "//exb_datasets(item), &
         file=__FILE__, line=__LINE__)) RETURN
     END DO
+
+    ! -- Field-line-integrated conductances and electric field, if requested
+    IF( ipe % parameters % write_conductivities )THEN
+
+      ! Conductivities decomposition (hemisphere, NLP, NMP)
+      CALL ipe % io % domain( (/ 2, ipe % grid % NLP, ipe % grid % NMP /), &
+        (/ 1, 1, ipe % mpi_layer % mp_low /), &
+        (/ 2, ipe % grid % NLP, ipe % mpi_layer % mp_high - ipe % mpi_layer % mp_low + 1 /) )
+      IF (ipe % io % err % check(msg="Failed to setup I/O data decomposition", &
+        file=__FILE__, line=__LINE__)) RETURN
+
+      DO item = 1, num_conductivities
+        CALL ipe % io % write(conductivities(item), &
+          ipe % plasma % conductivities(item,:,:, &
+          ipe % mpi_layer % mp_low:ipe % mpi_layer % mp_high))
+        IF (ipe % io % err % check(msg="Unable to write dataset "//conductivities(item), &
+          file=__FILE__, line=__LINE__)) RETURN
+      END DO
+
+      ! Electric field decomposition (NLP, NMP)
+      CALL ipe % io % domain( (/ ipe % grid % NLP, ipe % grid % NMP /), &
+        (/ 1, ipe % mpi_layer % mp_low /), &
+        (/ ipe % grid % NLP, ipe % mpi_layer % mp_high - ipe % mpi_layer % mp_low + 1 /) )
+      IF (ipe % io % err % check(msg="Failed to setup I/O data decomposition", &
+        file=__FILE__, line=__LINE__)) RETURN
+
+      DO item = 1, num_elef
+        CALL ipe % io % write(electric_field(item), &
+          ipe % eldyn % electric_field(item,:, &
+          ipe % mpi_layer % mp_low:ipe % mpi_layer % mp_high))
+        IF (ipe % io % err % check(msg="Unable to write dataset "//electric_field(item), &
+          file=__FILE__, line=__LINE__)) RETURN
+      END DO
+
+    END IF
 
     ! Close HDF5 file
     CALL ipe % io % close()
