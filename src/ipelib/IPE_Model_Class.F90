@@ -724,6 +724,21 @@ CONTAINS
         "/apex/Ed2"  &
       /)
 
+    ! LOCAL collision frequencies and conductivities, chunyen_rt layout and names.
+    ! sigma_ped / sigma_hall are what SAED reads (create_edgrid_tide_cur.py
+    ! Plasma.__init__ -> interpolate_to_geogrid); the rnu_* are kept alongside
+    ! them, as chunyen does, so sigma can be diagnosed without a rerun.
+    INTEGER, PARAMETER :: num_collision = 6
+    CHARACTER(LEN=*), DIMENSION(num_collision), PARAMETER :: collision = &
+      (/ &
+        "/apex/rnu_op    ", &
+        "/apex/rnu_o2p   ", &
+        "/apex/rnu_nop   ", &
+        "/apex/rnu_ne    ", &
+        "/apex/sigma_ped ", &
+        "/apex/sigma_hall"  &
+      /)
+
     INTEGER :: item
     CHARACTER(LEN=28) :: dset_name
 
@@ -870,6 +885,17 @@ CONTAINS
 
     ! -- Field-line-integrated conductances and electric field, if requested
     IF( ipe % parameters % write_conductivities )THEN
+
+      ! Local collision frequencies and conductivities first: these are on the
+      ! per-point (nFluxtube, NLP, NMP) grid, which is still the active
+      ! decomposition here. Must precede the domain switch below.
+      DO item = 1, num_collision
+        CALL ipe % io % write(collision(item), &
+          ipe % plasma % collision(item,:,:, &
+          ipe % mpi_layer % mp_low:ipe % mpi_layer % mp_high))
+        IF (ipe % io % err % check(msg="Unable to write dataset "//collision(item), &
+          file=__FILE__, line=__LINE__)) RETURN
+      END DO
 
       ! Conductivities decomposition (hemisphere, NLP, NMP)
       CALL ipe % io % domain( (/ 2, ipe % grid % NLP, ipe % grid % NMP /), &

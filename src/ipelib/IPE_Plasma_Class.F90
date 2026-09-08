@@ -37,6 +37,12 @@ MODULE IPE_Plasma_Class
 
     REAL(prec), ALLOCATABLE :: ionization_rates(:,:,:,:)
     REAL(prec), ALLOCATABLE :: conductivities(:,:,:,:)
+    ! LOCAL (un-integrated) collision frequencies and conductivities on the
+    ! apex grid, matching chunyen_rt's plasma % collision:
+    !   1 rnu_op  2 rnu_o2p  3 rnu_nop  4 rnu_ne  5 sigma_ped  6 sigma_hall
+    ! plasma % conductivities above holds only their field-line INTEGRALS,
+    ! which cannot be un-integrated; SAED integrates along its own grid.
+    REAL(prec), ALLOCATABLE :: collision(:,:,:,:)
 
 
     CONTAINS
@@ -160,6 +166,7 @@ CONTAINS
                 plasma % electron_velocity_old(1:3,1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 plasma % electron_temperature_old(1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 plasma % conductivities(1:8,1:2,1:NLP,1:NMP), &
+                plasma % collision(1:6,1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 plasma % ionization_rates(1:4,1:nFluxTube,1:NLP,mp_low-halo:mp_high+halo), &
                 stat = stat )
       IF ( ipe_alloc_check( stat, msg="Failed to allocate plasma internal arrays", &
@@ -173,6 +180,7 @@ CONTAINS
       plasma % electron_temperature    = safe_temperature_minimum
       plasma % ionization_rates        = 0.0_prec
       plasma % conductivities          = 0.0_prec
+      plasma % collision               = 0.0_prec
 
 #ifdef HAVE_MPI
       ALLOCATE( ion_requestHandle(1:16), ion_requestStats(MPI_STATUS_SIZE,1:16) )
@@ -207,6 +215,7 @@ CONTAINS
                 plasma % electron_temperature_old, &
                 plasma % ionization_rates, &
                 plasma % conductivities, &
+                plasma % collision, &
                 stat = stat )
     IF ( ipe_dealloc_check( stat, msg="Unable to free up memory", &
       line=__LINE__, file=__FILE__, rc=rc ) ) RETURN
@@ -1685,6 +1694,11 @@ CONTAINS
 
 ! Need to pick up only latitudes match dynamo grid for the calculation!
 
+   ! Points beyond flux_tube_max(lp), and those failing the electron-density
+   ! guard below, are never assigned -- clear so they read 0 rather than
+   ! retaining the previous timestep's values.
+   plasma % collision = 0.0_prec
+
    DO mp = grid % mp_low , grid % mp_high
      DO lp = 1, grid % NLP
 
@@ -1796,6 +1810,14 @@ CONTAINS
     &           plasma % ion_densities(1,i,lp,mp)/(1.+rnu_op **2)- &
     &           plasma % ion_densities(6,i,lp,mp)/(1.+rnu_o2p**2)- &
     &           plasma % ion_densities(5,i,lp,mp)/(1.+rnu_nop**2))
+
+!! retain the LOCAL collision frequencies and conductivities (chunyen_rt layout)
+        plasma % collision(1,i,lp,mp) = rnu_op
+        plasma % collision(2,i,lp,mp) = rnu_o2p
+        plasma % collision(3,i,lp,mp) = rnu_nop
+        plasma % collision(4,i,lp,mp) = rnu_ne
+        plasma % collision(5,i,lp,mp) = sigma_ped
+        plasma % collision(6,i,lp,mp) = sigma_hall
 
 ! get integrals
                 abs_ds = ABS(ds)
