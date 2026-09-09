@@ -57,6 +57,12 @@ MODULE IPE_Neutrals_FileReader
     ! Reference date for constructing file names
     INTEGER :: ref_year, ref_month, ref_day
 
+    ! Reference clock, captured at Init, for cumulative-hour file indexing.
+    ! ref_utime   = UT seconds on ref_day at the moment the reader was created
+    ! ref_elapsed = time % elapsed_sec at that same moment
+    REAL(prec) :: ref_utime   = 0.0_prec
+    REAL(prec) :: ref_elapsed = 0.0_prec
+
     ! Interpolation method: 'linear' or 'msis_ratio'
     CHARACTER(32) :: interp_method = 'linear'
 
@@ -124,13 +130,14 @@ CONTAINS
   ! Init_FileReader: Initialize the file reader, probe first file for dims
   !---------------------------------------------------------------------------
   SUBROUTINE Init_FileReader( reader, file_dir, ref_year, ref_month, ref_day, &
-                              mpi_layer, interp_method, rc )
+                              mpi_layer, interp_method, ref_utime, ref_elapsed, rc )
 
     CLASS(IPE_FileReader), INTENT(inout) :: reader
     CHARACTER(*),          INTENT(in)    :: file_dir
     INTEGER,               INTENT(in)    :: ref_year, ref_month, ref_day
     TYPE(IPE_MPI_Layer),   INTENT(in)    :: mpi_layer
     CHARACTER(*), OPTIONAL, INTENT(in)   :: interp_method
+    REAL(prec), OPTIONAL,  INTENT(in)    :: ref_utime, ref_elapsed
     INTEGER, OPTIONAL,     INTENT(out)   :: rc
 
     ! Local
@@ -144,6 +151,11 @@ CONTAINS
     reader % ref_year  = ref_year
     reader % ref_month = ref_month
     reader % ref_day   = ref_day
+
+    reader % ref_utime   = 0.0_prec
+    reader % ref_elapsed = 0.0_prec
+    IF ( PRESENT( ref_utime   ) ) reader % ref_utime   = ref_utime
+    IF ( PRESENT( ref_elapsed ) ) reader % ref_elapsed = ref_elapsed
 
     ! Probe the first GSM file for dimensions (rank 0 only)
     IF ( mpi_layer % rank_id == 0 ) THEN
@@ -409,6 +421,7 @@ CONTAINS
     INTEGER :: localrc
     REAL(prec) :: weight
     REAL(prec) :: current_hour_frac
+    REAL(prec) :: ut_before, ut_after
     INTEGER :: i, j, k
     REAL(prec) :: val_t0, val_t1
     LOGICAL :: use_msis_ratio
@@ -425,9 +438,14 @@ CONTAINS
 
     use_msis_ratio = ( TRIM(reader % interp_method) == 'msis_ratio' )
 
-    ! Determine current fractional hour from elapsed time
-    ! time % utime is seconds from midnight UTC
-    current_hour_frac = REAL(time % utime, prec) / 3600.0_prec
+    ! Fractional hours since ref_year/ref_month/ref_day 00:00 UT.
+    ! This MUST be cumulative across days. It cannot be time % utime: utime is
+    ! seconds from midnight and is wrapped by 86400 on every day rollover
+    ! (IPE_Time_Class), so it caps this index at 24. That pinned the file date to
+    ! the reference day and made the run replay that day's 24 files forever --
+    ! the diurnal cycle looked right while day-to-day evolution was absent.
+    current_hour_frac = ( reader % ref_utime &
+                          + ( time % elapsed_sec - reader % ref_elapsed ) ) / 3600.0_prec
 
     ! Bracketing hours
     hour_before = INT(current_hour_frac)
@@ -439,6 +457,11 @@ CONTAINS
       hour_after = hour_before
       weight = 0.0_prec
     ENDIF
+
+    ! hour_before/hour_after index FILES and so are cumulative; MSIS wants the
+    ! UT second-of-day at those same instants.
+    ut_before = REAL( MODULO( hour_before, 24 ), prec ) * 3600.0_prec
+    ut_after  = REAL( MODULO( hour_after,  24 ), prec ) * 3600.0_prec
 
     ! Load t0 buffer if needed
     IF ( reader % hour_t0 /= hour_before ) THEN
@@ -461,7 +484,7 @@ CONTAINS
         ! Compute MSIS at this hour boundary
         IF ( use_msis_ratio .AND. reader % msis_hour_t0 /= hour_before ) THEN
           CALL reader % Compute_MSIS_GeoGrid( &
-               hour_before * 3600.0_prec, time % day_of_year, &
+               ut_before, time % day_of_year, &
                forcing, altitude_geo, mpi_layer, reader % msis_t0, localrc )
           IF ( ipe_error_check( localrc, msg="FileReader: MSIS t0 failed", rc=rc ) ) RETURN
           reader % msis_hour_t0 = hour_before
@@ -478,7 +501,7 @@ CONTAINS
       ! Compute MSIS at this hour boundary
       IF ( use_msis_ratio .AND. reader % msis_hour_t1 /= hour_after ) THEN
         CALL reader % Compute_MSIS_GeoGrid( &
-             hour_after * 3600.0_prec, time % day_of_year, &
+             ut_after, time % day_of_year, &
              forcing, altitude_geo, mpi_layer, reader % msis_t1, localrc )
         IF ( ipe_error_check( localrc, msg="FileReader: MSIS t1 failed", rc=rc ) ) RETURN
         reader % msis_hour_t1 = hour_after
@@ -627,8 +650,14 @@ CONTAINS
 
     IF (PRESENT(rc)) rc = IPE_SUCCESS
 
-    ! Determine current fractional hour
-    current_hour_frac = REAL(time % utime, prec) / 3600.0_prec
+    ! Fractional hours since ref_year/ref_month/ref_day 00:00 UT.
+    ! This MUST be cumulative across days. It cannot be time % utime: utime is
+    ! seconds from midnight and is wrapped by 86400 on every day rollover
+    ! (IPE_Time_Class), so it caps this index at 24. That pinned the file date to
+    ! the reference day and made the run replay that day's 24 files forever --
+    ! the diurnal cycle looked right while day-to-day evolution was absent.
+    current_hour_frac = ( reader % ref_utime &
+                          + ( time % elapsed_sec - reader % ref_elapsed ) ) / 3600.0_prec
     hour_before = INT(current_hour_frac)
     hour_after  = hour_before + 1
     weight = current_hour_frac - REAL(hour_before, prec)
