@@ -246,6 +246,7 @@ CONTAINS
              time % year, time % month, time % day, &
              mpi_layer, &
              interp_method=TRIM(params % neutral_interp_method), &
+             ref_utime=time % utime, ref_elapsed=time % elapsed_sec, &
              rc=localrc )
         IF ( ipe_error_check( localrc, msg="FileReader Init failed", rc=rc ) ) RETURN
 
